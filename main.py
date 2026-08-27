@@ -6,7 +6,7 @@ from datetime import datetime
 
 import uvicorn
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -15,11 +15,12 @@ from fastapi import FastAPI
 from sqlalchemy import func, select
 
 from database import async_session, init_db
-from models import Consent, Participation, User
+from models import Admin, Consent, Participation, User
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "0"))
 PORT = int(os.getenv("PORT", 8000))
 
 logging.basicConfig(level=logging.INFO)
@@ -71,6 +72,16 @@ confirm_kb = InlineKeyboardMarkup(
     ]
 )
 
+admin_menu_kb = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="👥 Участники", callback_data="admin_participants")],
+        [InlineKeyboardButton(text="🎲 Провести розыгрыш", callback_data="admin_draw")],
+        [InlineKeyboardButton(text="🚫 Исключения", callback_data="admin_exclusions")],
+        [InlineKeyboardButton(text="👤 Управление админами", callback_data="admin_manage_admins")],
+    ]
+)
+
 
 class ReviewState(StatesGroup):
     waiting_video = State()
@@ -111,6 +122,28 @@ async def generate_ticket(session, year, month):
     return f"{year}-{month:02d}-A-{count + 1:04d}"
 
 
+async def ensure_super_admin():
+    if SUPER_ADMIN_ID == 0:
+        return
+    async with async_session() as session:
+        result = await session.execute(
+            select(Admin).where(Admin.telegram_user_id == SUPER_ADMIN_ID)
+        )
+        admin = result.scalar_one_or_none()
+        if admin is None:
+            session.add(Admin(telegram_user_id=SUPER_ADMIN_ID, role="superadmin"))
+            await session.commit()
+            logging.info(f"Super admin {SUPER_ADMIN_ID} added to database")
+
+
+async def is_admin(telegram_user_id: int) -> bool:
+    async with async_session() as session:
+        result = await session.execute(
+            select(Admin).where(Admin.telegram_user_id == telegram_user_id)
+        )
+        return result.scalar_one_or_none() is not None
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await get_or_create_user(message)
@@ -135,6 +168,15 @@ async def cmd_start(message: Message):
         return
 
     await message.answer(WELCOME_TEXT, reply_markup=read_consent_kb)
+
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+    if not await is_admin(message.from_user.id):
+        await message.answer("Команда не найдена.")
+        return
+
+    await message.answer("🛠 Панель управления", reply_markup=admin_menu_kb)
 
 
 @dp.callback_query(F.data == "read_consent")
@@ -233,9 +275,40 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
 
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("📊 Статистика (в разработке)")
+
+
+@dp.callback_query(F.data == "admin_participants")
+async def admin_participants(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("👥 Участники (в разработке)")
+
+
+@dp.callback_query(F.data == "admin_draw")
+async def admin_draw(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("🎲 Провести розыгрыш (в разработке)")
+
+
+@dp.callback_query(F.data == "admin_exclusions")
+async def admin_exclusions(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("🚫 Исключения (в разработке)")
+
+
+@dp.callback_query(F.data == "admin_manage_admins")
+async def admin_manage_admins(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("👤 Управление админами (в разработке)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await ensure_super_admin()
     asyncio.create_task(dp.start_polling(bot))
     yield
 
