@@ -1,4 +1,5 @@
-﻿from datetime import datetime
+﻿import secrets
+from datetime import datetime
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -8,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 
 from database import async_session
-from models import Admin, ExcludedUser, Participation, User
+from models import Admin, Draw, ExcludedUser, Participation, User, Winner
 
 router = Router()
 
@@ -18,6 +19,7 @@ MONTHS_RU = [
 ]
 
 STATUS_EMOJI = {"active": "✅", "disqualified": "❌", "winner": "🏆"}
+PRIZES = {1: 5000, 2: 3000, 3: 2000}
 
 admin_menu_kb = InlineKeyboardMarkup(
     inline_keyboard=[
@@ -54,6 +56,39 @@ async def get_admin(telegram_user_id: int):
 
 async def is_admin(telegram_user_id: int) -> bool:
     return await get_admin(telegram_user_id) is not None
+
+
+async def is_excluded(telegram_user_id: int) -> bool:
+    async with async_session() as session:
+        result = await session.execute(
+            select(ExcludedUser).where(ExcludedUser.telegram_user_id == telegram_user_id)
+        )
+        return result.scalar_one_or_none() is not None
+
+
+async def get_eligible_participants(session, year: int, month: int):
+    """Возвращает активных участников, eligible для розыгрыша за указанный период.
+    Это все active участники с period <= (year, month), которые не админы и не исключены."""
+    result = await session.execute(
+        select(Participation, User)
+        .outerjoin(User, User.telegram_user_id == Participation.telegram_user_id)
+        .where(Participation.status == "active")
+    )
+    all_rows = result.all()
+
+    eligible = []
+    for p, u in all_rows:
+        # Период участия должен быть <= целевого
+        if (p.period_year, p.period_month) > (year, month):
+            continue
+        # Исключаем админов
+        if await is_admin(p.telegram_user_id):
+            continue
+        # Исключаем исключённых
+        if await is_excluded(p.telegram_user_id):
+            continue
+        eligible.append((p, u))
+    return eligible
 
 
 @router.message(Command("admin"))
@@ -552,7 +587,265 @@ async def admin_del(callback: CallbackQuery):
     await callback.message.answer(f"Пользователь {target_id} больше не админ.")
 
 
+# ========== РОЗЫГРЫШ ==========
+
+
 @router.callback_query(F.data == "admin_draw")
 async def admin_draw(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    now = datetime.now()
+    # Собираем уникальные периоды из participations
+    async with async_session() as session:
+        result = await session.execute(
+            select(
+                Participation.period_year,
+                Participation.period_month,
+                func.count(),
+            )
+            .group_by(Participation.period_year, Participation.period_month)
+            .order_by(Participation.period_year.desc(), Participation.period_month.desc())
+        )
+        rows = result.all()
+
+    # Также добавим текущий месяц, если его нет в participations
+    periods = set((y, m) for y, m, _ in rows)
+    periods.add((now.year, now.month))
+    periods = sorted(periods, reverse=True)
+
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"{month_name(m)} {y}",
+            callback_data=f"draw_select:{y}:{m}",
+        )]
+        for y, m in periods
+    ]
+    buttons.append(back_kb_row)
+
     await callback.answer()
-    await callback.message.answer("🎲 Провести розыгрыш (в разработке)")
+    await callback.message.answer(
+        "🎲 Провести розыгрыш\n\nВыберите период:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("draw_select:"))
+async def draw_select(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    _, y, m = callback.data.split(":")
+    year, month = int(y), int(m)
+
+    # Проверяем, не был ли розыгрыш уже проведён
+    async with async_session() as session:
+        existing = (await session.execute(
+            select(Draw).where(
+                Draw.period_year == year,
+                Draw.period_month == month,
+                Draw.status == "completed",
+            )
+        )).scalar_one_or_none()
+
+    if existing is not None:
+        await callback.answer(
+            f"Розыгрыш за {month_name(month)} {year} уже проведён",
+            show_alert=True,
+        )
+        return
+
+    # Считаем eligible участников
+    async with async_session() as session:
+        eligible = await get_eligible_participants(session, year, month)
+
+    count = len(eligible)
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"✅ Провести розыгрыш ({count} чел.)" if count >= 3 else f"⚠️ Недостаточно участников ({count} чел.)",
+                callback_data=f"draw_confirm:{year}:{month}",
+            )],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_draw")],
+        ]
+    )
+
+    await callback.answer()
+    await callback.message.answer(
+        f"🎲 Розыгрыш за {month_name(month)} {year}\n\n"
+        f"Eligible участников: {count}\n"
+        f"(включая перенесённых с прошлых месяцев)\n\n"
+        f"Призы:\n"
+        f"🥇 1 место - 5 000 руб.\n"
+        f"🥈 2 место - 3 000 руб.\n"
+        f"🥉 3 место - 2 000 руб.\n\n"
+        + ("Можно проводить розыгрыш." if count >= 3 else
+           "Недостаточно участников (нужно минимум 3).\n"
+           "Если провести розыгрыш, участники будут перенесены на следующий месяц." if count < 3 else ""),
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("draw_confirm:"))
+async def draw_confirm(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    _, y, m = callback.data.split(":")
+    year, month = int(y), int(m)
+
+    async with async_session() as session:
+        # Проверяем, не был ли розыгрыш уже проведён
+        existing = (await session.execute(
+            select(Draw).where(
+                Draw.period_year == year,
+                Draw.period_month == month,
+                Draw.status == "completed",
+            )
+        )).scalar_one_or_none()
+        if existing is not None:
+            await callback.answer("Розыгрыш уже был проведён", show_alert=True)
+            return
+
+        eligible = await get_eligible_participants(session, year, month)
+        count = len(eligible)
+
+        if count < 3:
+            # Сохраняем запись о неудавшемся розыгрыше
+            session.add(Draw(
+                period_year=year,
+                period_month=month,
+                created_by=callback.from_user.id,
+                participants_count=count,
+                status="failed_min_participants",
+            ))
+            await session.commit()
+
+            await callback.answer()
+            await callback.message.answer(
+                f"❌ Розыгрыш за {month_name(month)} {year} НЕ проведён.\n\n"
+                f"Активных участников: {count}\n"
+                f"Минимально необходимое количество: 3\n\n"
+                f"Участники остаются активными и автоматически попадут в следующий розыгрыш."
+            )
+
+            # Уведомляем всех админов
+            admins_result = await session.execute(select(Admin))
+            admins = admins_result.scalars().all()
+            for admin in admins_list_without_self(admins, callback.from_user.id):
+                try:
+                    await callback.bot.send_message(
+                        admin.telegram_user_id,
+                        f"⚠️ Розыгрыш за {month_name(month)} {year} не проведён.\n\n"
+                        f"Активных участников: {count}\n"
+                        f"Минимально необходимое количество: 3\n\n"
+                        f"Участники перенесены на следующий месяц."
+                    )
+                except Exception:
+                    pass
+            return
+
+        # РОЗЫГРЫШ
+        # Криптографический рандом
+        rng = secrets.SystemRandom()
+        winners = rng.sample(eligible, 3)
+
+        # Создаём запись розыгрыша
+        draw = Draw(
+            period_year=year,
+            period_month=month,
+            created_by=callback.from_user.id,
+            participants_count=count,
+            status="completed",
+        )
+        session.add(draw)
+        await session.flush()  # чтобы получить draw.id
+
+        # Сохраняем победителей
+        results = []
+        for place, (participation, user) in enumerate(winners, start=1):
+            prize = PRIZES[place]
+            participation.status = "winner"
+            session.add(Winner(
+                draw_id=draw.id,
+                participation_id=participation.id,
+                place=place,
+                prize_amount=prize,
+                notified_at=None,
+            ))
+            results.append((place, prize, participation, user))
+
+        await session.commit()
+
+    await callback.answer()
+    await callback.message.answer(
+        f"🎉 Розыгрыш за {month_name(month)} {year} завершён!\n\n"
+        f"Победители выбраны, уведомления отправлены."
+    )
+
+    # Отправляем уведомления победителям
+    for place, prize, participation, user in results:
+        place_emoji = {1: "🥇", 2: "🥈", 3: "🥉"}[place]
+        try:
+            await callback.bot.send_message(
+                participation.telegram_user_id,
+                f"{place_emoji} Поздравляем!\n\n"
+                f"Вы заняли {place} место в ежемесячном розыгрыше за видеотзыв.\n\n"
+                f"Ваш билет: № {participation.ticket_number}\n"
+                f"Ваш приз: {prize:,} руб.\n\n"
+                f"Пожалуйста, ожидайте связи с администратором для получения приза."
+            )
+            # Обновляем notified_at
+            async with async_session() as session:
+                winner_record = (await session.execute(
+                    select(Winner).where(
+                        Winner.draw_id == draw.id,
+                        Winner.place == place,
+                    )
+                )).scalar_one_or_none()
+                if winner_record is not None:
+                    winner_record.notified_at = datetime.now()
+                    await session.commit()
+        except Exception as e:
+            # Если победитель заблокировал бота, продолжаем
+            pass
+
+    # Формируем отчёт для админов
+    report_lines = [
+        f"🏆 Розыгрыш за {month_name(month)} {year} завершён.",
+        f"Всего участников: {count}",
+        "",
+        "Победители:",
+    ]
+    for place, prize, participation, user in results:
+        place_emoji = {1: "🥇", 2: "🥈", 3: "🥉"}[place]
+        name = f"{user.first_name or ''} {user.last_name or ''}".strip() if user is not None else "Неизвестно"
+        username = f"@{user.username}" if user is not None and user.username else "нет"
+        report_lines.append(
+            f"\n{place_emoji} {place} место ({prize:,} руб.):\n"
+            f"Имя: {name}\n"
+            f"Username: {username}\n"
+            f"Telegram ID: {participation.telegram_user_id}\n"
+            f"Билет: № {participation.ticket_number}"
+        )
+    report_lines.append("\nНеобходимо связаться с победителями для выдачи приза.")
+    report_text = "\n".join(report_lines)
+
+    # Рассылаем отчёт всем админам
+    async with async_session() as session:
+        admins_result = await session.execute(select(Admin))
+        admins = admins_result.scalars().all()
+
+    for admin in admins:
+        try:
+            await callback.bot.send_message(admin.telegram_user_id, report_text)
+        except Exception:
+            pass
+
+
+def admins_list_without_self(admins, self_id: int):
+    return [a for a in admins if a.telegram_user_id != self_id]
