@@ -265,33 +265,5 @@ app = FastAPI(lifespan=lifespan)
 async def health():
     return {"status": "ok"}
 
-
-@app.get("/migrate")
-async def migrate():
-    """Одноразовая миграция: меняет INTEGER на BIGINT для Telegram ID."""
-    columns_to_migrate = [
-        ("users", "telegram_user_id"),
-        ("admins", "telegram_user_id"),
-        ("admins", "added_by"),
-        ("consents", "telegram_user_id"),
-        ("excluded_users", "telegram_user_id"),
-        ("excluded_users", "added_by"),
-        ("participations", "telegram_user_id"),
-        ("participations", "disqualified_by"),
-        ("draws", "created_by"),
-    ]
-    results = []
-    async with engine.begin() as conn:
-        for table, column in columns_to_migrate:
-            try:
-                await conn.execute(
-                    text(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT")
-                )
-                results.append(f"OK: {table}.{column}")
-            except Exception as e:
-                results.append(f"SKIP {table}.{column}: {str(e)[:100]}")
-    return {"status": "done", "results": results}
-
-
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
