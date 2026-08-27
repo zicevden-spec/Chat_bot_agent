@@ -9,24 +9,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-    ReplyKeyboardRemove,
-)
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from sqlalchemy import func, select
 
-from admin_handlers import (
-    admin_reply_kb,
-    is_admin,
-    is_excluded,
-    router as admin_router,
-    setup_admin_commands,
-)
+from admin_handlers import router as admin_router
 from database import async_session, init_db
 from models import Admin, Consent, Participation, User
 
@@ -52,11 +40,6 @@ WELCOME_TEXT = (
     "1 место - 5 000 руб.\n"
     "2 место - 3 000 руб.\n"
     "3 место - 2 000 руб."
-)
-
-ADMIN_WELCOME_TEXT = (
-    "Здравствуйте! Это администраторский режим.\n\n"
-    "Нажмите кнопку «🛠 Админка» внизу экрана, чтобы открыть панель управления."
 )
 
 CONSENT_TEXT_PART1 = (
@@ -99,7 +82,7 @@ CONSENT_TEXT_PART1 = (
     "3.1. Клиент даёт согласие на обработку Компанией персональных данных, содержащихся "
     "в Видеоотзыве, включая изображение, голос, а также имя (никнейм), сообщённые Клиентом "
     "сведения. Изображение и голос могут относиться к биометрическим персональным данным.\n\n"
-    "3.2. Обработка включает сбор, запись, систематизация, хранение, использование, "
+    "3.2. Обработка включает сбор, запись, систематизацию, хранение, использование, "
     "распространение (публикацию), обезличивание, удаление персональных данных "
     "как с использованием средств автоматизации, так и без таковых.\n\n"
     "3.3. Согласие действует со дня акцепта Оферты в течение срока, необходимого "
@@ -186,8 +169,6 @@ async def get_or_create_user(message: Message):
 
 
 async def generate_ticket(session, year, month):
-    """Берём MAX существующего номера за месяц и добавляем 1.
-    Это гарантирует уникальность даже при удалении записей и race condition."""
     result = await session.execute(
         select(func.max(Participation.ticket_number))
         .where(
@@ -219,25 +200,11 @@ async def ensure_super_admin():
             session.add(Admin(telegram_user_id=SUPER_ADMIN_ID, role="superadmin"))
             await session.commit()
             logging.info(f"Super admin {SUPER_ADMIN_ID} added to database")
-    await setup_admin_commands(bot, SUPER_ADMIN_ID)
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await get_or_create_user(message)
-
-    if await is_admin(message.from_user.id):
-        # Админ видит только приветствие админа + персистентную кнопку
-        await message.answer(ADMIN_WELCOME_TEXT, reply_markup=admin_reply_kb)
-        return
-
-    if await is_excluded(message.from_user.id):
-        # Исключённый (сотрудник) не участвует в розыгрыше
-        await message.answer(
-            "Здравствуйте! Ваш аккаунт отмечен как служебный и не участвует в розыгрыше.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return
 
     now = datetime.now()
     async with async_session() as session:
@@ -254,8 +221,7 @@ async def cmd_start(message: Message):
         await message.answer(
             "Вы уже принимали участие в акции в этом месяце.\n\n"
             f"Ваш билет: № {participation.ticket_number}\n\n"
-            "Спасибо за ваш отзыв!",
-            reply_markup=ReplyKeyboardRemove(),
+            "Спасибо за ваш отзыв!"
         )
         return
 
@@ -264,10 +230,6 @@ async def cmd_start(message: Message):
 
 @dp.callback_query(F.data == "read_consent")
 async def read_consent(callback: CallbackQuery):
-    # Защита: если пользователь стал админом/исключённым после /start
-    if await is_admin(callback.from_user.id) or await is_excluded(callback.from_user.id):
-        await callback.answer("Ваш аккаунт не участвует в розыгрыше", show_alert=True)
-        return
     await callback.answer()
     await callback.message.answer(CONSENT_TEXT_PART1)
     await callback.message.answer(CONSENT_TEXT_PART2, reply_markup=consent_kb)
@@ -275,11 +237,6 @@ async def read_consent(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "consent_yes")
 async def consent_yes(callback: CallbackQuery, state: FSMContext):
-    if await is_admin(callback.from_user.id) or await is_excluded(callback.from_user.id):
-        await callback.answer("Ваш аккаунт не участвует в розыгрыше", show_alert=True)
-        await state.clear()
-        return
-
     async with async_session() as session:
         session.add(
             Consent(
@@ -328,16 +285,6 @@ async def confirm_no(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_yes")
 async def confirm_yes(callback: CallbackQuery, state: FSMContext):
-    # Финальная защита: админы и исключённые не могут участвовать
-    if await is_admin(callback.from_user.id):
-        await callback.answer("Админы не участвуют в розыгрыше", show_alert=True)
-        await state.clear()
-        return
-    if await is_excluded(callback.from_user.id):
-        await callback.answer("Ваш аккаунт исключён из розыгрыша", show_alert=True)
-        await state.clear()
-        return
-
     data = await state.get_data()
     video_file_id = data.get("video_file_id")
 
@@ -348,7 +295,6 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext):
 
     now = datetime.now()
     async with async_session() as session:
-        # Проверяем, не участвовал ли уже в этом месяце
         result = await session.execute(
             select(Participation).where(
                 Participation.telegram_user_id == callback.from_user.id,
