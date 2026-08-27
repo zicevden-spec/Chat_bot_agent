@@ -8,9 +8,16 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 
 from database import async_session
-from models import Admin, ExcludedUser, Participation
+from models import Admin, ExcludedUser, Participation, User
 
 router = Router()
+
+MONTHS_RU = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
+
+STATUS_EMOJI = {"active": "✅", "disqualified": "❌", "winner": "🏆"}
 
 admin_menu_kb = InlineKeyboardMarkup(
     inline_keyboard=[
@@ -30,6 +37,11 @@ class AdminState(StatesGroup):
     waiting_exclusion_reason = State()
     waiting_admin_id = State()
     waiting_admin_role = State()
+    waiting_disqualify_reason = State()
+
+
+def month_name(month: int) -> str:
+    return MONTHS_RU[month - 1]
 
 
 async def get_admin(telegram_user_id: int):
@@ -99,6 +111,198 @@ async def admin_stats(callback: CallbackQuery):
         f"Исключённых пользователей: {excluded}\n"
         f"Админов: {admins}\n"
     )
+
+
+@router.callback_query(F.data == "admin_participants")
+async def admin_participants(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await state.clear()
+    async with async_session() as session:
+        result = await session.execute(
+            select(
+                Participation.period_year,
+                Participation.period_month,
+                func.count(),
+            )
+            .group_by(Participation.period_year, Participation.period_month)
+            .order_by(Participation.period_year.desc(), Participation.period_month.desc())
+        )
+        rows = result.all()
+    if not rows:
+        await callback.answer("Участников пока нет", show_alert=True)
+        return
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"{month_name(m)} {y} - {c} чел.",
+            callback_data=f"part_period:{y}:{m}",
+        )]
+        for y, m, c in rows
+    ]
+    buttons.append(back_kb_row)
+    await callback.answer()
+    await callback.message.answer(
+        "👥 Участники\n\nВыберите период:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("part_period:"))
+async def part_period(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    _, y, m = callback.data.split(":")
+    year, month = int(y), int(m)
+    async with async_session() as session:
+        result = await session.execute(
+            select(Participation, User)
+            .outerjoin(User, User.telegram_user_id == Participation.telegram_user_id)
+            .where(Participation.period_year == year, Participation.period_month == month)
+            .order_by(Participation.id)
+        )
+        rows = result.all()
+    buttons = []
+    for p, u in rows:
+        name = u.first_name if u is not None else "Неизвестно"
+        emoji = STATUS_EMOJI.get(p.status, "")
+        buttons.append([InlineKeyboardButton(
+            text=f"{emoji} {p.ticket_number} - {name}",
+            callback_data=f"part_user:{p.id}",
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ К периодам", callback_data="admin_participants")])
+    await callback.answer()
+    await callback.message.answer(
+        f"👥 Участники за {month_name(month)} {year} (нажмите на участника):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("part_user:"))
+async def part_user(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    part_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        result = await session.execute(
+            select(Participation, User)
+            .outerjoin(User, User.telegram_user_id == Participation.telegram_user_id)
+            .where(Participation.id == part_id)
+        )
+        row = result.first()
+    if row is None:
+        await callback.answer("Участие не найдено", show_alert=True)
+        return
+    p, u = row
+    name = f"{u.first_name or ''} {u.last_name or ''}".strip() if u is not None else "Неизвестно"
+    username = f"@{u.username}" if u is not None and u.username else "нет"
+    status_ru = {"active": "активен", "disqualified": "дисквалифицирован", "winner": "победитель"}.get(p.status, p.status)
+
+    buttons = [
+        [InlineKeyboardButton(text="▶️ Показать видео", callback_data=f"part_video:{p.id}")],
+    ]
+    if p.status == "active":
+        buttons.append([InlineKeyboardButton(text="❌ Дисквалифицировать", callback_data=f"part_disq:{p.id}")])
+    if p.status == "disqualified":
+        buttons.append([InlineKeyboardButton(text="✅ Вернуть в розыгрыш", callback_data=f"part_requal:{p.id}")])
+    buttons.append([InlineKeyboardButton(
+        text="⬅️ К списку",
+        callback_data=f"part_period:{p.period_year}:{p.period_month}",
+    )])
+
+    text = (
+        f"🎫 Билет: {p.ticket_number}\n"
+        f"Имя: {name}\n"
+        f"Username: {username}\n"
+        f"Telegram ID: {p.telegram_user_id}\n"
+        f"Дата: {p.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"Статус: {status_ru}\n"
+    )
+    if p.status == "disqualified":
+        text += f"Причина: {p.disqualify_reason or 'не указана'}\n"
+
+    await callback.answer()
+    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@router.callback_query(F.data.startswith("part_video:"))
+async def part_video(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    part_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        p = (await session.execute(
+            select(Participation).where(Participation.id == part_id)
+        )).scalar_one_or_none()
+    if p is None:
+        await callback.answer("Участие не найдено", show_alert=True)
+        return
+    await callback.answer("Отправляю видео")
+    await callback.message.answer_video_note(p.video_file_id)
+
+
+@router.callback_query(F.data.startswith("part_disq:"))
+async def part_disq(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    part_id = int(callback.data.split(":")[1])
+    await state.update_data(disq_part_id=part_id)
+    await state.set_state(AdminState.waiting_disqualify_reason)
+    await callback.answer()
+    await callback.message.answer("Укажите причину дисквалификации.")
+
+
+@router.message(AdminState.waiting_disqualify_reason)
+async def disq_reason(message: Message, state: FSMContext):
+    data = await state.get_data()
+    part_id = data.get("disq_part_id")
+    async with async_session() as session:
+        p = (await session.execute(
+            select(Participation).where(Participation.id == part_id)
+        )).scalar_one_or_none()
+        if p is None:
+            await message.answer("Участие не найдено.")
+            await state.clear()
+            return
+        if p.status == "winner":
+            await message.answer("Победителя нельзя дисквалифицировать.")
+            await state.clear()
+            return
+        p.status = "disqualified"
+        p.disqualified_by = message.from_user.id
+        p.disqualified_at = datetime.now()
+        p.disqualify_reason = message.text
+        await session.commit()
+        ticket = p.ticket_number
+    await message.answer(f"Участник {ticket} дисквалифицирован.")
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("part_requal:"))
+async def part_requal(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    part_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        p = (await session.execute(
+            select(Participation).where(Participation.id == part_id)
+        )).scalar_one_or_none()
+        if p is None:
+            await callback.answer("Участие не найдено", show_alert=True)
+            return
+        p.status = "active"
+        p.disqualified_by = None
+        p.disqualified_at = None
+        p.disqualify_reason = None
+        await session.commit()
+        ticket = p.ticket_number
+    await callback.answer("Возвращён в розыгрыш")
+    await callback.message.answer(f"Участник {ticket} снова участвует в розыгрыше.")
 
 
 @router.callback_query(F.data == "admin_exclusions")
@@ -346,12 +550,6 @@ async def admin_del(callback: CallbackQuery):
         await session.commit()
     await callback.answer("Админ удалён")
     await callback.message.answer(f"Пользователь {target_id} больше не админ.")
-
-
-@router.callback_query(F.data == "admin_participants")
-async def admin_participants(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer("👥 Участники (в разработке)")
 
 
 @router.callback_query(F.data == "admin_draw")
