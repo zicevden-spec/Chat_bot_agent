@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from sqlalchemy import func, select
+from sqlalchemy.exc import InterfaceError
 
 from admin_handlers import router as admin_router
 from database import async_session, init_db
@@ -189,17 +190,31 @@ async def generate_ticket(session, year, month):
 
 
 async def ensure_super_admin():
+    """Создаёт супер-админа с retry-логикой для нестабильных соединений."""
     if SUPER_ADMIN_ID == 0:
         return
-    async with async_session() as session:
-        result = await session.execute(
-            select(Admin).where(Admin.telegram_user_id == SUPER_ADMIN_ID)
-        )
-        admin = result.scalar_one_or_none()
-        if admin is None:
-            session.add(Admin(telegram_user_id=SUPER_ADMIN_ID, role="superadmin"))
-            await session.commit()
-            logging.info(f"Super admin {SUPER_ADMIN_ID} added to database")
+    
+    for attempt in range(3):
+        try:
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Admin).where(Admin.telegram_user_id == SUPER_ADMIN_ID)
+                )
+                admin = result.scalar_one_or_none()
+                if admin is None:
+                    session.add(Admin(telegram_user_id=SUPER_ADMIN_ID, role="superadmin"))
+                    await session.commit()
+                    logging.info(f"Super admin {SUPER_ADMIN_ID} added to database")
+            return  # Успех
+        except InterfaceError as e:
+            logging.warning(f"Database connection error (attempt {attempt + 1}/3): {e}")
+            if attempt < 2:
+                await asyncio.sleep(2)  # Ждём перед повтором
+            else:
+                logging.error("Failed to ensure super admin after 3 attempts")
+        except Exception as e:
+            logging.error(f"Unexpected error ensuring super admin: {e}")
+            return
 
 
 @dp.message(CommandStart())
@@ -332,8 +347,11 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
-    await ensure_super_admin()
+    try:
+        await init_db()
+        await ensure_super_admin()
+    except Exception as e:
+        logging.error(f"Error during startup: {e}")
     asyncio.create_task(dp.start_polling(bot))
     yield
 
