@@ -12,10 +12,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from admin_handlers import router as admin_router
-from database import async_session, engine, init_db
+from database import async_session, init_db
 from models import Admin, Consent, Participation, User
 
 load_dotenv()
@@ -264,6 +264,7 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
