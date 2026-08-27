@@ -12,10 +12,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from admin_handlers import router as admin_router
-from database import async_session, init_db
+from database import async_session, engine, init_db
 from models import Admin, Consent, Participation, User
 
 load_dotenv()
@@ -264,6 +264,33 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/migrate")
+async def migrate():
+    """Одноразовая миграция: меняет INTEGER на BIGINT для Telegram ID."""
+    columns_to_migrate = [
+        ("users", "telegram_user_id"),
+        ("admins", "telegram_user_id"),
+        ("admins", "added_by"),
+        ("consents", "telegram_user_id"),
+        ("excluded_users", "telegram_user_id"),
+        ("excluded_users", "added_by"),
+        ("participations", "telegram_user_id"),
+        ("participations", "disqualified_by"),
+        ("draws", "created_by"),
+    ]
+    results = []
+    async with engine.begin() as conn:
+        for table, column in columns_to_migrate:
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT")
+                )
+                results.append(f"OK: {table}.{column}")
+            except Exception as e:
+                results.append(f"SKIP {table}.{column}: {str(e)[:100]}")
+    return {"status": "done", "results": results}
 
 
 if __name__ == "__main__":

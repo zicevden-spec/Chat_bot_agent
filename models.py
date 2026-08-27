@@ -1,6 +1,6 @@
 ﻿from datetime import datetime
 
-from sqlalchemy import Integer, String, DateTime, Text
+from sqlalchemy import BigInteger, Integer, String, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -12,7 +12,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_user_id: Mapped[int] = mapped_column(unique=True, index=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[str | None] = mapped_column(String(255))
     first_name: Mapped[str | None] = mapped_column(String(255))
     last_name: Mapped[str | None] = mapped_column(String(255))
@@ -24,9 +24,9 @@ class Admin(Base):
     __tablename__ = "admins"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_user_id: Mapped[int] = mapped_column(unique=True, index=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     role: Mapped[str] = mapped_column(String(50), default="admin")
-    added_by: Mapped[int | None] = mapped_column(Integer)
+    added_by: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
@@ -34,7 +34,7 @@ class Consent(Base):
     __tablename__ = "consents"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_user_id: Mapped[int] = mapped_column(index=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     consent_version: Mapped[str] = mapped_column(String(50), default="placeholder_v1")
     accepted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
@@ -43,9 +43,9 @@ class ExcludedUser(Base):
     __tablename__ = "excluded_users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_user_id: Mapped[int] = mapped_column(unique=True, index=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     reason: Mapped[str | None] = mapped_column(Text)
-    added_by: Mapped[int | None] = mapped_column(Integer)
+    added_by: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
@@ -53,13 +53,13 @@ class Participation(Base):
     __tablename__ = "participations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_user_id: Mapped[int] = mapped_column(index=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     ticket_number: Mapped[str] = mapped_column(String(50), unique=True)
     video_file_id: Mapped[str] = mapped_column(Text)
     period_year: Mapped[int] = mapped_column(Integer)
     period_month: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(50), default="active")
-    disqualified_by: Mapped[int | None] = mapped_column(Integer)
+    disqualified_by: Mapped[int | None] = mapped_column(BigInteger)
     disqualified_at: Mapped[datetime | None] = mapped_column(DateTime)
     disqualify_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
@@ -71,7 +71,7 @@ class Draw(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     period_year: Mapped[int] = mapped_column(Integer)
     period_month: Mapped[int] = mapped_column(Integer)
-    created_by: Mapped[int | None] = mapped_column(Integer)
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
     participants_count: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
