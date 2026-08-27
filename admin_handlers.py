@@ -5,7 +5,16 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 from sqlalchemy import func, select
 
 from database import async_session
@@ -29,6 +38,12 @@ admin_menu_kb = InlineKeyboardMarkup(
         [InlineKeyboardButton(text="🚫 Исключения", callback_data="admin_exclusions")],
         [InlineKeyboardButton(text="👤 Управление админами", callback_data="admin_manage_admins")],
     ]
+)
+
+admin_reply_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="🛠 Админка")]],
+    resize_keyboard=True,
+    is_persistent=True,
 )
 
 back_kb_row = [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back")]
@@ -66,6 +81,23 @@ async def is_excluded(telegram_user_id: int) -> bool:
         return result.scalar_one_or_none() is not None
 
 
+async def setup_admin_commands(bot, telegram_user_id: int):
+    try:
+        await bot.set_my_commands(
+            [BotCommand(command="admin", description="🛠 Панель управления")],
+            scope=BotCommandScopeChat(chat_id=telegram_user_id),
+        )
+    except Exception:
+        pass
+
+
+async def reset_admin_commands(bot, telegram_user_id: int):
+    try:
+        await bot.set_my_commands([], scope=BotCommandScopeChat(chat_id=telegram_user_id))
+    except Exception:
+        pass
+
+
 async def get_eligible_participants(session, year: int, month: int):
     result = await session.execute(
         select(Participation, User)
@@ -86,12 +118,24 @@ async def get_eligible_participants(session, year: int, month: int):
     return eligible
 
 
+async def show_admin_panel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🛠 Панель управления", reply_markup=admin_menu_kb)
+
+
 @router.message(Command("admin"))
-async def cmd_admin(message: Message):
+async def cmd_admin(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id):
         await message.answer("Команда не найдена.")
         return
-    await message.answer("🛠 Панель управления", reply_markup=admin_menu_kb)
+    await show_admin_panel(message, state)
+
+
+@router.message(F.text == "🛠 Админка")
+async def admin_button(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        return
+    await show_admin_panel(message, state)
 
 
 @router.callback_query(F.data == "admin_back")
@@ -592,6 +636,16 @@ async def admin_role(callback: CallbackQuery, state: FSMContext):
             await callback.message.answer(
                 f"Пользователь {target_id} добавлен с ролью «{role}»."
             )
+            await setup_admin_commands(callback.bot, target_id)
+            try:
+                await callback.bot.send_message(
+                    target_id,
+                    "🎉 Вам выданы права админа в боте розыгрыша.\n\n"
+                    "Откройте бота и нажмите /start - "
+                    "внизу появится кнопка «🛠 Админка».",
+                )
+            except Exception:
+                pass
     await state.clear()
     await callback.answer()
 
@@ -651,6 +705,7 @@ async def admin_del(callback: CallbackQuery):
                 return
         await session.delete(target)
         await session.commit()
+    await reset_admin_commands(callback.bot, target_id)
     await callback.answer("Админ удалён")
     await callback.message.answer(f"Пользователь {target_id} больше не админ.")
 

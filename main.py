@@ -9,12 +9,23 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardRemove,
+)
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from sqlalchemy import func, select
 
-from admin_handlers import router as admin_router
+from admin_handlers import (
+    admin_reply_kb,
+    is_admin,
+    router as admin_router,
+    setup_admin_commands,
+)
 from database import async_session, init_db
 from models import Admin, Consent, Participation, User
 
@@ -193,11 +204,17 @@ async def ensure_super_admin():
             session.add(Admin(telegram_user_id=SUPER_ADMIN_ID, role="superadmin"))
             await session.commit()
             logging.info(f"Super admin {SUPER_ADMIN_ID} added to database")
+    await setup_admin_commands(bot, SUPER_ADMIN_ID)
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await get_or_create_user(message)
+
+    if await is_admin(message.from_user.id):
+        reply_kb = admin_reply_kb
+    else:
+        reply_kb = ReplyKeyboardRemove()
 
     now = datetime.now()
     async with async_session() as session:
@@ -214,11 +231,12 @@ async def cmd_start(message: Message):
         await message.answer(
             "Вы уже принимали участие в акции в этом месяце.\n\n"
             f"Ваш билет: № {participation.ticket_number}\n\n"
-            "Спасибо за ваш отзыв!"
+            "Спасибо за ваш отзыв!",
+            reply_markup=reply_kb,
         )
         return
 
-    await message.answer(WELCOME_TEXT, reply_markup=read_consent_kb)
+    await message.answer(WELCOME_TEXT, reply_markup=reply_kb)
 
 
 @dp.callback_query(F.data == "read_consent")
