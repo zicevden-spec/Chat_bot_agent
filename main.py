@@ -23,6 +23,7 @@ from sqlalchemy import func, select
 from admin_handlers import (
     admin_reply_kb,
     is_admin,
+    is_excluded,
     router as admin_router,
     setup_admin_commands,
 )
@@ -51,6 +52,11 @@ WELCOME_TEXT = (
     "1 место - 5 000 руб.\n"
     "2 место - 3 000 руб.\n"
     "3 место - 2 000 руб."
+)
+
+ADMIN_WELCOME_TEXT = (
+    "Здравствуйте! Это администраторский режим.\n\n"
+    "Нажмите кнопку «🛠 Админка» внизу экрана, чтобы открыть панель управления."
 )
 
 CONSENT_TEXT_PART1 = (
@@ -93,7 +99,7 @@ CONSENT_TEXT_PART1 = (
     "3.1. Клиент даёт согласие на обработку Компанией персональных данных, содержащихся "
     "в Видеоотзыве, включая изображение, голос, а также имя (никнейм), сообщённые Клиентом "
     "сведения. Изображение и голос могут относиться к биометрическим персональным данным.\n\n"
-    "3.2. Обработка включает сбор, запись, систематизацию, хранение, использование, "
+    "3.2. Обработка включает сбор, запись, систематизация, хранение, использование, "
     "распространение (публикацию), обезличивание, удаление персональных данных "
     "как с использованием средств автоматизации, так и без таковых.\n\n"
     "3.3. Согласие действует со дня акцепта Оферты в течение срока, необходимого "
@@ -180,16 +186,25 @@ async def get_or_create_user(message: Message):
 
 
 async def generate_ticket(session, year, month):
+    """Берём MAX существующего номера за месяц и добавляем 1.
+    Это гарантирует уникальность даже при удалении записей и race condition."""
     result = await session.execute(
-        select(func.count())
-        .select_from(Participation)
+        select(func.max(Participation.ticket_number))
         .where(
             Participation.period_year == year,
             Participation.period_month == month,
         )
     )
-    count = result.scalar_one()
-    return f"{year}-{month:02d}-A-{count + 1:04d}"
+    max_ticket = result.scalar_one_or_none()
+    if max_ticket is None:
+        next_num = 1
+    else:
+        try:
+            last_part = max_ticket.split("-")[-1]
+            next_num = int(last_part) + 1
+        except (ValueError, IndexError):
+            next_num = 1
+    return f"{year}-{month:02d}-A-{next_num:04d}"
 
 
 async def ensure_super_admin():
@@ -212,9 +227,17 @@ async def cmd_start(message: Message):
     await get_or_create_user(message)
 
     if await is_admin(message.from_user.id):
-        reply_kb = admin_reply_kb
-    else:
-        reply_kb = ReplyKeyboardRemove()
+        # Админ видит только приветствие админа + персистентную кнопку
+        await message.answer(ADMIN_WELCOME_TEXT, reply_markup=admin_reply_kb)
+        return
+
+    if await is_excluded(message.from_user.id):
+        # Исключённый (сотрудник) не участвует в розыгрыше
+        await message.answer(
+            "Здравствуйте! Ваш аккаунт отмечен как служебный и не участвует в розыгрыше.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
 
     now = datetime.now()
     async with async_session() as session:
@@ -232,15 +255,19 @@ async def cmd_start(message: Message):
             "Вы уже принимали участие в акции в этом месяце.\n\n"
             f"Ваш билет: № {participation.ticket_number}\n\n"
             "Спасибо за ваш отзыв!",
-            reply_markup=reply_kb,
+            reply_markup=ReplyKeyboardRemove(),
         )
         return
 
-    await message.answer(WELCOME_TEXT, reply_markup=reply_kb)
+    await message.answer(WELCOME_TEXT, reply_markup=read_consent_kb)
 
 
 @dp.callback_query(F.data == "read_consent")
 async def read_consent(callback: CallbackQuery):
+    # Защита: если пользователь стал админом/исключённым после /start
+    if await is_admin(callback.from_user.id) or await is_excluded(callback.from_user.id):
+        await callback.answer("Ваш аккаунт не участвует в розыгрыше", show_alert=True)
+        return
     await callback.answer()
     await callback.message.answer(CONSENT_TEXT_PART1)
     await callback.message.answer(CONSENT_TEXT_PART2, reply_markup=consent_kb)
@@ -248,6 +275,11 @@ async def read_consent(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "consent_yes")
 async def consent_yes(callback: CallbackQuery, state: FSMContext):
+    if await is_admin(callback.from_user.id) or await is_excluded(callback.from_user.id):
+        await callback.answer("Ваш аккаунт не участвует в розыгрыше", show_alert=True)
+        await state.clear()
+        return
+
     async with async_session() as session:
         session.add(
             Consent(
@@ -296,6 +328,16 @@ async def confirm_no(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_yes")
 async def confirm_yes(callback: CallbackQuery, state: FSMContext):
+    # Финальная защита: админы и исключённые не могут участвовать
+    if await is_admin(callback.from_user.id):
+        await callback.answer("Админы не участвуют в розыгрыше", show_alert=True)
+        await state.clear()
+        return
+    if await is_excluded(callback.from_user.id):
+        await callback.answer("Ваш аккаунт исключён из розыгрыша", show_alert=True)
+        await state.clear()
+        return
+
     data = await state.get_data()
     video_file_id = data.get("video_file_id")
 
@@ -306,6 +348,7 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext):
 
     now = datetime.now()
     async with async_session() as session:
+        # Проверяем, не участвовал ли уже в этом месяце
         result = await session.execute(
             select(Participation).where(
                 Participation.telegram_user_id == callback.from_user.id,
