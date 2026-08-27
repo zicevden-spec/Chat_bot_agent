@@ -29,6 +29,7 @@ class AdminState(StatesGroup):
     waiting_exclusion_id = State()
     waiting_exclusion_reason = State()
     waiting_admin_id = State()
+    waiting_admin_role = State()
 
 
 async def get_admin(telegram_user_id: int):
@@ -220,7 +221,12 @@ async def admin_manage_admins(callback: CallbackQuery, state: FSMContext):
         ]
     )
     await callback.answer()
-    await callback.message.answer("👤 Управление админами", reply_markup=kb)
+    await callback.message.answer(
+        "👤 Управление админами\n\n"
+        "Админ - видит статистику, участников, может проводить розыгрыш.\n"
+        "Супер-админ - всё то же самое плюс управление админами.",
+        reply_markup=kb,
+    )
 
 
 @router.callback_query(F.data == "admin_add")
@@ -240,16 +246,47 @@ async def admin_add_id(message: Message, state: FSMContext):
     if not text.isdigit():
         await message.answer("Это не похоже на числовой ID. Попробуйте ещё раз.")
         return
-    target_id = int(text)
+    await state.update_data(new_admin_id=int(text))
+    await state.set_state(AdminState.waiting_admin_role)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Админ", callback_data="admin_role:admin")],
+            [InlineKeyboardButton(text="Супер-админ", callback_data="admin_role:superadmin")],
+        ]
+    )
+    await message.answer("Какую роль выдать пользователю?", reply_markup=kb)
+
+
+@router.message(AdminState.waiting_admin_role)
+async def admin_role_hint(message: Message):
+    await message.answer("Нажмите кнопку под предыдущим сообщением: Админ или Супер-админ.")
+
+
+@router.callback_query(F.data.startswith("admin_role:"))
+async def admin_role(callback: CallbackQuery, state: FSMContext):
+    admin = await get_admin(callback.from_user.id)
+    if admin is None or admin.role != "superadmin":
+        await callback.answer("Доступно только супер-админу", show_alert=True)
+        return
+    data = await state.get_data()
+    target_id = data.get("new_admin_id")
+    if target_id is None:
+        await callback.answer("Не удалось получить ID. Начните заново.", show_alert=True)
+        await state.clear()
+        return
+    role = callback.data.split(":")[1]
     async with async_session() as session:
         result = await session.execute(select(Admin).where(Admin.telegram_user_id == target_id))
         if result.scalar_one_or_none() is not None:
-            await message.answer("Этот пользователь уже админ.")
+            await callback.answer("Этот пользователь уже админ", show_alert=True)
         else:
-            session.add(Admin(telegram_user_id=target_id, role="admin", added_by=message.from_user.id))
+            session.add(Admin(telegram_user_id=target_id, role=role, added_by=callback.from_user.id))
             await session.commit()
-            await message.answer(f"Пользователь {target_id} теперь админ.")
+            await callback.message.answer(
+                f"Пользователь {target_id} добавлен с ролью «{role}»."
+            )
     await state.clear()
+    await callback.answer()
 
 
 @router.callback_query(F.data == "admin_list")
@@ -263,10 +300,11 @@ async def admin_list(callback: CallbackQuery):
         items = result.scalars().all()
     buttons = []
     for i in items:
-        if i.role == "superadmin":
+        if i.telegram_user_id == callback.from_user.id:
             continue
+        role_ru = "супер-админ" if i.role == "superadmin" else "админ"
         buttons.append([InlineKeyboardButton(
-            text=f"Удалить админа {i.telegram_user_id}",
+            text=f"Удалить: {i.telegram_user_id} ({role_ru})",
             callback_data=f"admin_del:{i.telegram_user_id}",
         )])
     if not buttons:
@@ -287,12 +325,25 @@ async def admin_del(callback: CallbackQuery):
         await callback.answer("Доступно только супер-админу", show_alert=True)
         return
     target_id = int(callback.data.split(":")[1])
+    if target_id == callback.from_user.id:
+        await callback.answer("Нельзя удалить самого себя", show_alert=True)
+        return
     async with async_session() as session:
-        result = await session.execute(select(Admin).where(Admin.telegram_user_id == target_id))
-        item = result.scalar_one_or_none()
-        if item is not None and item.role != "superadmin":
-            await session.delete(item)
-            await session.commit()
+        target = (await session.execute(
+            select(Admin).where(Admin.telegram_user_id == target_id)
+        )).scalar_one_or_none()
+        if target is None:
+            await callback.answer("Админ не найден", show_alert=True)
+            return
+        if target.role == "superadmin":
+            supers = (await session.execute(
+                select(func.count()).select_from(Admin).where(Admin.role == "superadmin")
+            )).scalar_one()
+            if supers <= 1:
+                await callback.answer("Нельзя удалить последнего супер-админа", show_alert=True)
+                return
+        await session.delete(target)
+        await session.commit()
     await callback.answer("Админ удалён")
     await callback.message.answer(f"Пользователь {target_id} больше не админ.")
 
