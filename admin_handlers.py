@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 
 from database import async_session
-from models import Admin, Draw, ExcludedUser, Participation, User, Winner
+from models import Admin, Consent, Draw, ExcludedUser, Participation, User, Winner
 
 router = Router()
 
@@ -67,8 +67,6 @@ async def is_excluded(telegram_user_id: int) -> bool:
 
 
 async def get_eligible_participants(session, year: int, month: int):
-    """Возвращает активных участников, eligible для розыгрыша за указанный период.
-    Это все active участники с period <= (year, month), которые не админы и не исключены."""
     result = await session.execute(
         select(Participation, User)
         .outerjoin(User, User.telegram_user_id == Participation.telegram_user_id)
@@ -78,13 +76,10 @@ async def get_eligible_participants(session, year: int, month: int):
 
     eligible = []
     for p, u in all_rows:
-        # Период участия должен быть <= целевого
         if (p.period_year, p.period_month) > (year, month):
             continue
-        # Исключаем админов
         if await is_admin(p.telegram_user_id):
             continue
-        # Исключаем исключённых
         if await is_excluded(p.telegram_user_id):
             continue
         eligible.append((p, u))
@@ -242,6 +237,7 @@ async def part_user(callback: CallbackQuery):
         buttons.append([InlineKeyboardButton(text="❌ Дисквалифицировать", callback_data=f"part_disq:{p.id}")])
     if p.status == "disqualified":
         buttons.append([InlineKeyboardButton(text="✅ Вернуть в розыгрыш", callback_data=f"part_requal:{p.id}")])
+    buttons.append([InlineKeyboardButton(text="🗑 Удалить из базы", callback_data=f"part_del_ask:{p.id}")])
     buttons.append([InlineKeyboardButton(
         text="⬅️ К списку",
         callback_data=f"part_period:{p.period_year}:{p.period_month}",
@@ -338,6 +334,78 @@ async def part_requal(callback: CallbackQuery):
         ticket = p.ticket_number
     await callback.answer("Возвращён в розыгрыш")
     await callback.message.answer(f"Участник {ticket} снова участвует в розыгрыше.")
+
+
+@router.callback_query(F.data.startswith("part_del_ask:"))
+async def part_del_ask(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    part_id = int(callback.data.split(":")[1])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚠️ Да, удалить полностью", callback_data=f"part_del_yes:{part_id}")],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"part_user:{part_id}")],
+        ]
+    )
+    await callback.answer()
+    await callback.message.answer(
+        "⚠️ ВНИМАНИЕ!\n\n"
+        "Будут полностью удалены из базы:\n"
+        "- пользователь\n"
+        "- все его участия и билеты\n"
+        "- согласия\n"
+        "- записи о победах\n\n"
+        "Действие необратимо. Подтвердите удаление.",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("part_del_yes:"))
+async def part_del_yes(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    part_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        p = (await session.execute(
+            select(Participation).where(Participation.id == part_id)
+        )).scalar_one_or_none()
+        if p is None:
+            await callback.answer("Участие не найдено", show_alert=True)
+            return
+        uid = p.telegram_user_id
+
+        parts = (await session.execute(
+            select(Participation).where(Participation.telegram_user_id == uid)
+        )).scalars().all()
+        part_ids = [x.id for x in parts]
+
+        winners = (await session.execute(
+            select(Winner).where(Winner.participation_id.in_(part_ids))
+        )).scalars().all()
+        for w in winners:
+            await session.delete(w)
+        for x in parts:
+            await session.delete(x)
+
+        consents = (await session.execute(
+            select(Consent).where(Consent.telegram_user_id == uid)
+        )).scalars().all()
+        for c in consents:
+            await session.delete(c)
+
+        u = (await session.execute(
+            select(User).where(User.telegram_user_id == uid)
+        )).scalar_one_or_none()
+        if u is not None:
+            await session.delete(u)
+
+        await session.commit()
+    await callback.answer("Клиент удалён из базы")
+    await callback.message.answer(
+        f"Клиент с Telegram ID {uid} полностью удалён из базы данных."
+    )
 
 
 @router.callback_query(F.data == "admin_exclusions")
@@ -597,7 +665,6 @@ async def admin_draw(callback: CallbackQuery):
         return
 
     now = datetime.now()
-    # Собираем уникальные периоды из participations
     async with async_session() as session:
         result = await session.execute(
             select(
@@ -610,7 +677,6 @@ async def admin_draw(callback: CallbackQuery):
         )
         rows = result.all()
 
-    # Также добавим текущий месяц, если его нет в participations
     periods = set((y, m) for y, m, _ in rows)
     periods.add((now.year, now.month))
     periods = sorted(periods, reverse=True)
@@ -640,7 +706,6 @@ async def draw_select(callback: CallbackQuery):
     _, y, m = callback.data.split(":")
     year, month = int(y), int(m)
 
-    # Проверяем, не был ли розыгрыш уже проведён
     async with async_session() as session:
         existing = (await session.execute(
             select(Draw).where(
@@ -657,7 +722,6 @@ async def draw_select(callback: CallbackQuery):
         )
         return
 
-    # Считаем eligible участников
     async with async_session() as session:
         eligible = await get_eligible_participants(session, year, month)
 
@@ -684,7 +748,7 @@ async def draw_select(callback: CallbackQuery):
         f"🥉 3 место - 2 000 руб.\n\n"
         + ("Можно проводить розыгрыш." if count >= 3 else
            "Недостаточно участников (нужно минимум 3).\n"
-           "Если провести розыгрыш, участники будут перенесены на следующий месяц." if count < 3 else ""),
+           "Участники останутся активными и попадут в следующий розыгрыш."),
         reply_markup=kb,
     )
 
@@ -699,7 +763,6 @@ async def draw_confirm(callback: CallbackQuery):
     year, month = int(y), int(m)
 
     async with async_session() as session:
-        # Проверяем, не был ли розыгрыш уже проведён
         existing = (await session.execute(
             select(Draw).where(
                 Draw.period_year == year,
@@ -715,7 +778,6 @@ async def draw_confirm(callback: CallbackQuery):
         count = len(eligible)
 
         if count < 3:
-            # Сохраняем запись о неудавшемся розыгрыше
             session.add(Draw(
                 period_year=year,
                 period_month=month,
@@ -733,10 +795,11 @@ async def draw_confirm(callback: CallbackQuery):
                 f"Участники остаются активными и автоматически попадут в следующий розыгрыш."
             )
 
-            # Уведомляем всех админов
             admins_result = await session.execute(select(Admin))
             admins = admins_result.scalars().all()
-            for admin in admins_list_without_self(admins, callback.from_user.id):
+            for admin in admins:
+                if admin.telegram_user_id == callback.from_user.id:
+                    continue
                 try:
                     await callback.bot.send_message(
                         admin.telegram_user_id,
@@ -749,12 +812,9 @@ async def draw_confirm(callback: CallbackQuery):
                     pass
             return
 
-        # РОЗЫГРЫШ
-        # Криптографический рандом
         rng = secrets.SystemRandom()
         winners = rng.sample(eligible, 3)
 
-        # Создаём запись розыгрыша
         draw = Draw(
             period_year=year,
             period_month=month,
@@ -763,9 +823,8 @@ async def draw_confirm(callback: CallbackQuery):
             status="completed",
         )
         session.add(draw)
-        await session.flush()  # чтобы получить draw.id
+        await session.flush()
 
-        # Сохраняем победителей
         results = []
         for place, (participation, user) in enumerate(winners, start=1):
             prize = PRIZES[place]
@@ -787,7 +846,6 @@ async def draw_confirm(callback: CallbackQuery):
         f"Победители выбраны, уведомления отправлены."
     )
 
-    # Отправляем уведомления победителям
     for place, prize, participation, user in results:
         place_emoji = {1: "🥇", 2: "🥈", 3: "🥉"}[place]
         try:
@@ -799,7 +857,6 @@ async def draw_confirm(callback: CallbackQuery):
                 f"Ваш приз: {prize:,} руб.\n\n"
                 f"Пожалуйста, ожидайте связи с администратором для получения приза."
             )
-            # Обновляем notified_at
             async with async_session() as session:
                 winner_record = (await session.execute(
                     select(Winner).where(
@@ -810,11 +867,9 @@ async def draw_confirm(callback: CallbackQuery):
                 if winner_record is not None:
                     winner_record.notified_at = datetime.now()
                     await session.commit()
-        except Exception as e:
-            # Если победитель заблокировал бота, продолжаем
+        except Exception:
             pass
 
-    # Формируем отчёт для админов
     report_lines = [
         f"🏆 Розыгрыш за {month_name(month)} {year} завершён.",
         f"Всего участников: {count}",
@@ -835,7 +890,6 @@ async def draw_confirm(callback: CallbackQuery):
     report_lines.append("\nНеобходимо связаться с победителями для выдачи приза.")
     report_text = "\n".join(report_lines)
 
-    # Рассылаем отчёт всем админам
     async with async_session() as session:
         admins_result = await session.execute(select(Admin))
         admins = admins_result.scalars().all()
@@ -845,7 +899,3 @@ async def draw_confirm(callback: CallbackQuery):
             await callback.bot.send_message(admin.telegram_user_id, report_text)
         except Exception:
             pass
-
-
-def admins_list_without_self(admins, self_id: int):
-    return [a for a in admins if a.telegram_user_id != self_id]
