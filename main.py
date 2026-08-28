@@ -1,10 +1,8 @@
 ﻿import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
 from datetime import datetime
 
-import uvicorn
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -17,7 +15,6 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from dotenv import load_dotenv
-from fastapi import FastAPI
 from sqlalchemy import func, select
 from sqlalchemy.exc import InterfaceError
 
@@ -35,7 +32,6 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "0"))
-PORT = int(os.getenv("PORT", 8000))
 
 logging.basicConfig(level=logging.INFO)
 
@@ -392,24 +388,16 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+async def main():
     try:
         await init_db()
         await ensure_super_admin()
     except Exception as e:
         logging.error(f"Error during startup: {e}")
-    asyncio.create_task(dp.start_polling(bot))
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+    
+    logging.info("Starting bot polling...")
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    asyncio.run(main())
