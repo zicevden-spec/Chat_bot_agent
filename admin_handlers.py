@@ -712,9 +712,33 @@ async def admin_del(callback: CallbackQuery):
 
 # ========== РОЗЫГРЫШ ==========
 
+draw_menu_kb = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(text="▶️ Запустить", callback_data="draw_run"),
+            InlineKeyboardButton(text="♻️ Обнулить", callback_data="draw_reset"),
+        ],
+        back_kb_row,
+    ]
+)
+
 
 @router.callback_query(F.data == "admin_draw")
 async def admin_draw(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
+        "🎲 Розыгрыш\n\n"
+        "▶️ Запустить - выбрать период и провести розыгрыш.\n"
+        "♻️ Обнулить - отменить результаты и провести розыгрыш заново.",
+        reply_markup=draw_menu_kb,
+    )
+
+
+@router.callback_query(F.data == "draw_run")
+async def draw_run(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
@@ -743,13 +767,133 @@ async def admin_draw(callback: CallbackQuery):
         )]
         for y, m in periods
     ]
-    buttons.append(back_kb_row)
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_draw")])
 
     await callback.answer()
     await callback.message.answer(
         "🎲 Провести розыгрыш\n\nВыберите период:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
+
+
+@router.callback_query(F.data == "draw_reset")
+async def draw_reset(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Draw).order_by(Draw.period_year.desc(), Draw.period_month.desc())
+        )
+        draws = result.scalars().all()
+
+    if not draws:
+        await callback.answer("Проведённых розыгрышей пока нет", show_alert=True)
+        return
+
+    buttons = []
+    for d in draws:
+        status_ru = "проведён" if d.status == "completed" else "не проведён"
+        buttons.append([InlineKeyboardButton(
+            text=f"♻️ {month_name(d.period_month)} {d.period_year} - {status_ru}",
+            callback_data=f"draw_reset_sel:{d.period_year}:{d.period_month}",
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_draw")])
+
+    await callback.answer()
+    await callback.message.answer(
+        "♻️ Обнуление розыгрыша\n\n"
+        "Выберите период, результаты которого нужно отменить:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("draw_reset_sel:"))
+async def draw_reset_sel(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    _, y, m = callback.data.split(":")
+    year, month = int(y), int(m)
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚠️ Да, обнулить", callback_data=f"draw_reset_yes:{year}:{month}")],
+            [InlineKeyboardButton(text="Отмена", callback_data="draw_reset")],
+        ]
+    )
+    await callback.answer()
+    await callback.message.answer(
+        f"⚠️ Обнулить розыгрыш за {month_name(month)} {year}?\n\n"
+        "Что произойдёт:\n"
+        "- результаты и победители будут удалены\n"
+        "- участники вернутся в статус «активен»\n"
+        "- розыгрыш можно будет провести заново\n\n"
+        "Внимание: уже отправленные уведомления победителям отозвать нельзя.",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("draw_reset_yes:"))
+async def draw_reset_yes(callback: CallbackQuery):
+    admin = await get_admin(callback.from_user.id)
+    if admin is None:
+        await callback.answer("Доступ запрещён", show_alert=True)
+        return
+
+    _, y, m = callback.data.split(":")
+    year, month = int(y), int(m)
+
+    async with async_session() as session:
+        draw = (await session.execute(
+            select(Draw).where(
+                Draw.period_year == year,
+                Draw.period_month == month,
+            )
+        )).scalar_one_or_none()
+
+        if draw is None:
+            await callback.answer("Розыгрыш за этот период не найден", show_alert=True)
+            return
+
+        winners = (await session.execute(
+            select(Winner).where(Winner.draw_id == draw.id)
+        )).scalars().all()
+
+        for w in winners:
+            participation = (await session.execute(
+                select(Participation).where(Participation.id == w.participation_id)
+            )).scalar_one_or_none()
+            if participation is not None and participation.status == "winner":
+                participation.status = "active"
+            await session.delete(w)
+
+        await session.delete(draw)
+        await session.commit()
+
+    await callback.answer("Розыгрыш обнулён")
+    await callback.message.answer(
+        f"♻️ Розыгрыш за {month_name(month)} {year} обнулён.\n\n"
+        "Участники снова активны - можно проводить розыгрыш заново."
+    )
+
+    # Уведомляем всех админов об обнулении
+    async with async_session() as session:
+        admins_result = await session.execute(select(Admin))
+        admins = admins_result.scalars().all()
+    for a in admins:
+        if a.telegram_user_id == callback.from_user.id:
+            continue
+        try:
+            await callback.bot.send_message(
+                a.telegram_user_id,
+                f"♻️ Розыгрыш за {month_name(month)} {year} обнулён администратором "
+                f"{callback.from_user.id}. Можно провести его заново.",
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data.startswith("draw_select:"))
@@ -788,7 +932,7 @@ async def draw_select(callback: CallbackQuery):
                 text=f"✅ Провести розыгрыш ({count} чел.)" if count >= 3 else f"⚠️ Недостаточно участников ({count} чел.)",
                 callback_data=f"draw_confirm:{year}:{month}",
             )],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_draw")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="draw_run")],
         ]
     )
 
