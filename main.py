@@ -9,13 +9,25 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardRemove,
+)
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from sqlalchemy import func, select
 from sqlalchemy.exc import InterfaceError
 
-from admin_handlers import router as admin_router
+from admin_handlers import (
+    admin_reply_kb,
+    is_admin,
+    is_excluded,
+    router as admin_router,
+    setup_admin_commands,
+)
 from database import async_session, init_db
 from models import Admin, Consent, Participation, User
 
@@ -41,6 +53,15 @@ WELCOME_TEXT = (
     "1 место - 5 000 руб.\n"
     "2 место - 3 000 руб.\n"
     "3 место - 2 000 руб."
+)
+
+ADMIN_WELCOME_TEXT = (
+    "Здравствуйте! Это администраторский режим.\n\n"
+    "Нажмите кнопку «🛠 Админка» внизу экрана, чтобы открыть панель управления."
+)
+
+EXCLUDED_TEXT = (
+    "Здравствуйте! Ваш аккаунт отмечен как служебный и не участвует в розыгрыше."
 )
 
 CONSENT_TEXT_PART1 = (
@@ -190,10 +211,9 @@ async def generate_ticket(session, year, month):
 
 
 async def ensure_super_admin():
-    """Создаёт супер-админа с retry-логикой для нестабильных соединений."""
     if SUPER_ADMIN_ID == 0:
         return
-    
+
     for attempt in range(3):
         try:
             async with async_session() as session:
@@ -205,11 +225,12 @@ async def ensure_super_admin():
                     session.add(Admin(telegram_user_id=SUPER_ADMIN_ID, role="superadmin"))
                     await session.commit()
                     logging.info(f"Super admin {SUPER_ADMIN_ID} added to database")
-            return  # Успех
+            await setup_admin_commands(bot, SUPER_ADMIN_ID)
+            return
         except InterfaceError as e:
             logging.warning(f"Database connection error (attempt {attempt + 1}/3): {e}")
             if attempt < 2:
-                await asyncio.sleep(2)  # Ждём перед повтором
+                await asyncio.sleep(2)
             else:
                 logging.error("Failed to ensure super admin after 3 attempts")
         except Exception as e:
@@ -220,6 +241,14 @@ async def ensure_super_admin():
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await get_or_create_user(message)
+
+    if await is_admin(message.from_user.id):
+        await message.answer(ADMIN_WELCOME_TEXT, reply_markup=admin_reply_kb)
+        return
+
+    if await is_excluded(message.from_user.id):
+        await message.answer(EXCLUDED_TEXT, reply_markup=ReplyKeyboardRemove())
+        return
 
     now = datetime.now()
     async with async_session() as session:
@@ -236,7 +265,8 @@ async def cmd_start(message: Message):
         await message.answer(
             "Вы уже принимали участие в акции в этом месяце.\n\n"
             f"Ваш билет: № {participation.ticket_number}\n\n"
-            "Спасибо за ваш отзыв!"
+            "Спасибо за ваш отзыв!",
+            reply_markup=ReplyKeyboardRemove(),
         )
         return
 
@@ -245,6 +275,9 @@ async def cmd_start(message: Message):
 
 @dp.callback_query(F.data == "read_consent")
 async def read_consent(callback: CallbackQuery):
+    if await is_admin(callback.from_user.id) or await is_excluded(callback.from_user.id):
+        await callback.answer("Ваш аккаунт не участвует в розыгрыше", show_alert=True)
+        return
     await callback.answer()
     await callback.message.answer(CONSENT_TEXT_PART1)
     await callback.message.answer(CONSENT_TEXT_PART2, reply_markup=consent_kb)
@@ -252,6 +285,11 @@ async def read_consent(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "consent_yes")
 async def consent_yes(callback: CallbackQuery, state: FSMContext):
+    if await is_admin(callback.from_user.id) or await is_excluded(callback.from_user.id):
+        await callback.answer("Ваш аккаунт не участвует в розыгрыше", show_alert=True)
+        await state.clear()
+        return
+
     async with async_session() as session:
         session.add(
             Consent(
@@ -300,6 +338,15 @@ async def confirm_no(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_yes")
 async def confirm_yes(callback: CallbackQuery, state: FSMContext):
+    if await is_admin(callback.from_user.id):
+        await callback.answer("Админы не участвуют в розыгрыше", show_alert=True)
+        await state.clear()
+        return
+    if await is_excluded(callback.from_user.id):
+        await callback.answer("Ваш аккаунт исключён из розыгрыша", show_alert=True)
+        await state.clear()
+        return
+
     data = await state.get_data()
     video_file_id = data.get("video_file_id")
 
