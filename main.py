@@ -48,6 +48,7 @@ dp = Dispatcher()
 dp.include_router(admin_router)
 
 OFFER_URL = "https://chat-bot-agent.onrender.com/offer"
+CLIENTS_CHAT_URL = "https://t.me/+gIEAX5nwGH9mOGVi"
 
 WELCOME_TEXT = (
     "Примите участие в ежемесячном розыгрыше!\n\n"
@@ -397,7 +398,11 @@ async def confirm_yes(callback: CallbackQuery, state: FSMContext):
         "Спасибо! Ваш отзыв принят.\n\n"
         f"Ваш регистрационный номер:\n№ {ticket}\n\n"
         "Розыгрыш пройдёт в конце месяца.\n"
-        "Если вы станете победителем, мы сообщим вам в этом боте."
+        "Если вы станете победителем, мы сообщим вам в этом боте.\n\n"
+        f"📢 Результаты рекламного конкурса будут опубликованы "
+        f"в [Чате клиентов ФЦБ]({CLIENTS_CHAT_URL})",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
     await state.clear()
 
