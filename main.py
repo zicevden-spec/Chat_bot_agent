@@ -19,7 +19,6 @@ from aiogram.types import (
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from sqlalchemy import func, select
-from sqlalchemy.exc import InterfaceError
 
 from admin_handlers import (
     admin_reply_kb,
@@ -211,10 +210,11 @@ async def generate_ticket(session, year, month):
 
 
 async def ensure_super_admin():
+    """Создаёт супер-админа с усиленной retry-логикой."""
     if SUPER_ADMIN_ID == 0:
         return
 
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             async with async_session() as session:
                 result = await session.execute(
@@ -227,15 +227,15 @@ async def ensure_super_admin():
                     logging.info(f"Super admin {SUPER_ADMIN_ID} added to database")
             await setup_admin_commands(bot, SUPER_ADMIN_ID)
             return
-        except InterfaceError as e:
-            logging.warning(f"Database connection error (attempt {attempt + 1}/3): {e}")
-            if attempt < 2:
-                await asyncio.sleep(2)
-            else:
-                logging.error("Failed to ensure super admin after 3 attempts")
         except Exception as e:
-            logging.error(f"Unexpected error ensuring super admin: {e}")
-            return
+            wait_time = min(2 ** attempt, 30)
+            logging.warning(
+                f"ensure_super_admin attempt {attempt + 1}/5 failed: {type(e).__name__}: {e}. "
+                f"Retrying in {wait_time}s..."
+            )
+            await asyncio.sleep(wait_time)
+    
+    logging.error("Failed to ensure super admin after 5 attempts, continuing without it")
 
 
 @dp.message(CommandStart())
