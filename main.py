@@ -1,4 +1,5 @@
 ﻿import asyncio
+import html as html_lib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 
 from admin_handlers import (
@@ -44,6 +46,8 @@ if not BOT_TOKEN or BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 dp.include_router(admin_router)
+
+OFFER_URL = "https://chat-bot-agent.onrender.com/offer"
 
 WELCOME_TEXT = (
     "Примите участие в ежемесячном розыгрыше!\n\n"
@@ -148,7 +152,7 @@ QUESTIONS_TEXT = (
 )
 
 read_consent_kb = InlineKeyboardMarkup(
-    inline_keyboard=[[InlineKeyboardButton(text="Прочитать согласие", callback_data="read_consent")]]
+    inline_keyboard=[[InlineKeyboardButton(text="📄 Ознакомиться с условиями", callback_data="read_consent")]]
 )
 
 consent_kb = InlineKeyboardMarkup(
@@ -210,7 +214,6 @@ async def generate_ticket(session, year, month):
 
 
 async def ensure_super_admin():
-    """Создаёт супер-админа с усиленной retry-логикой."""
     if SUPER_ADMIN_ID == 0:
         return
 
@@ -234,7 +237,7 @@ async def ensure_super_admin():
                 f"Retrying in {wait_time}s..."
             )
             await asyncio.sleep(wait_time)
-    
+
     logging.error("Failed to ensure super admin after 5 attempts, continuing without it")
 
 
@@ -279,8 +282,15 @@ async def read_consent(callback: CallbackQuery):
         await callback.answer("Ваш аккаунт не участвует в розыгрыше", show_alert=True)
         return
     await callback.answer()
-    await callback.message.answer(CONSENT_TEXT_PART1)
-    await callback.message.answer(CONSENT_TEXT_PART2, reply_markup=consent_kb)
+    await callback.message.answer(
+        "📄 Условия конкурса, а также согласие на использование изображения "
+        "и обработку персональных данных изложены в публичной оферте:\n\n"
+        f"[Прочитать оферту]({OFFER_URL})\n\n"
+        "Нажимая кнопку «Я согласен», вы подтверждаете, что ознакомились "
+        "с офертой и принимаете её условия.",
+        parse_mode="Markdown",
+        reply_markup=consent_kb,
+    )
 
 
 @dp.callback_query(F.data == "consent_yes")
@@ -294,7 +304,7 @@ async def consent_yes(callback: CallbackQuery, state: FSMContext):
         session.add(
             Consent(
                 telegram_user_id=callback.from_user.id,
-                consent_version="offer_v1",
+                consent_version="offer_link_v1",
             )
         )
         await session.commit()
@@ -406,9 +416,26 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.api_route("/health", methods=["GET", "HEAD"])
+@app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/offer", response_class=HTMLResponse)
+async def offer():
+    text = CONSENT_TEXT_PART1 + "\n\n" + CONSENT_TEXT_PART2
+    escaped = html_lib.escape(text)
+    body = escaped.replace("\n", "<br>")
+    return (
+        "<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Публичная оферта - ФЦБ</title>"
+        "<style>body{font-family:Arial,Helvetica,sans-serif;background:#f4f6f8;"
+        "margin:0;padding:24px;}.card{max-width:760px;margin:0 auto;background:#fff;"
+        "border-radius:12px;padding:28px 24px;box-shadow:0 2px 12px rgba(0,0,0,.08);"
+        "line-height:1.55;font-size:15px;color:#222;}</style>"
+        "</head><body><div class='card'>" + body + "</div></body></html>"
+    )
 
 
 if __name__ == "__main__":
