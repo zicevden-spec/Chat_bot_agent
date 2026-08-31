@@ -143,7 +143,10 @@ async def admin_back(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer("🛠 Панель управления", reply_markup=admin_menu_kb)
 
 
@@ -176,7 +179,10 @@ async def admin_stats(callback: CallbackQuery):
             select(func.count()).select_from(Admin)
         )).scalar_one()
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "📊 Статистика\n\n"
         f"Всего билетов за всё время: {total}\n"
@@ -215,7 +221,10 @@ async def admin_participants(callback: CallbackQuery, state: FSMContext):
         for y, m, c in rows
     ]
     buttons.append(back_kb_row)
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "👥 Участники\n\nВыберите период:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -246,7 +255,10 @@ async def part_period(callback: CallbackQuery):
             callback_data=f"part_user:{p.id}",
         )])
     buttons.append([InlineKeyboardButton(text="⬅️ К периодам", callback_data="admin_participants")])
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         f"👥 Участники за {month_name(month)} {year} (нажмите на участника):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -298,7 +310,10 @@ async def part_user(callback: CallbackQuery):
     if p.status == "disqualified":
         text += f"Причина: {p.disqualify_reason or 'не указана'}\n"
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
@@ -327,7 +342,10 @@ async def part_disq(callback: CallbackQuery, state: FSMContext):
     part_id = int(callback.data.split(":")[1])
     await state.update_data(disq_part_id=part_id)
     await state.set_state(AdminState.waiting_disqualify_reason)
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer("Укажите причину дисквалификации.")
 
 
@@ -392,7 +410,10 @@ async def part_del_ask(callback: CallbackQuery):
             [InlineKeyboardButton(text="Отмена", callback_data=f"part_user:{part_id}")],
         ]
     )
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "⚠️ ВНИМАНИЕ!\n\n"
         "Будут полностью удалены из базы:\n"
@@ -465,7 +486,10 @@ async def admin_exclusions(callback: CallbackQuery, state: FSMContext):
             back_kb_row,
         ]
     )
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "🚫 Исключения\n\n"
         "Сюда добавляются сотрудники и тестовые аккаунты. "
@@ -477,7 +501,10 @@ async def admin_exclusions(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "excl_add")
 async def excl_add(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminState.waiting_exclusion_id)
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "Отправьте Telegram ID пользователя, которого нужно исключить из розыгрыша."
     )
@@ -535,7 +562,10 @@ async def excl_list(callback: CallbackQuery):
         for i in items
     ]
     buttons.append(back_kb_row)
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "🚫 Исключённые пользователи (нажмите, чтобы удалить):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -571,7 +601,10 @@ async def admin_manage_admins(callback: CallbackQuery, state: FSMContext):
             back_kb_row,
         ]
     )
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "👤 Управление админами\n\n"
         "Админ - видит статистику, участников, может проводить розыгрыш.\n"
@@ -587,7 +620,10 @@ async def admin_add(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Доступно только супер-админу", show_alert=True)
         return
     await state.set_state(AdminState.waiting_admin_id)
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer("Отправьте Telegram ID нового админа.")
 
 
@@ -647,7 +683,10 @@ async def admin_role(callback: CallbackQuery, state: FSMContext):
             except Exception:
                 pass
     await state.clear()
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "admin_list")
@@ -672,7 +711,10 @@ async def admin_list(callback: CallbackQuery):
         await callback.answer("Других админов пока нет", show_alert=True)
         return
     buttons.append(back_kb_row)
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "👤 Админы (нажмите, чтобы удалить):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -728,7 +770,10 @@ async def admin_draw(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "🎲 Розыгрыш\n\n"
         "▶️ Запустить - выбрать период и провести розыгрыш.\n"
@@ -769,7 +814,10 @@ async def draw_run(callback: CallbackQuery):
     ]
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_draw")])
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "🎲 Провести розыгрыш\n\nВыберите период:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -801,7 +849,10 @@ async def draw_reset(callback: CallbackQuery):
         )])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_draw")])
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "♻️ Обнуление розыгрыша\n\n"
         "Выберите период, результаты которого нужно отменить:",
@@ -824,7 +875,10 @@ async def draw_reset_sel(callback: CallbackQuery):
             [InlineKeyboardButton(text="Отмена", callback_data="draw_reset")],
         ]
     )
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         f"⚠️ Обнулить розыгрыш за {month_name(month)} {year}?\n\n"
         "Что произойдёт:\n"
@@ -936,7 +990,10 @@ async def draw_select(callback: CallbackQuery):
         ]
     )
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         f"🎲 Розыгрыш за {month_name(month)} {year}\n\n"
         f"Eligible участников: {count}\n"
@@ -1039,7 +1096,10 @@ async def draw_confirm(callback: CallbackQuery):
 
         await session.commit()
 
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         f"🎉 Розыгрыш за {month_name(month)} {year} завершён!\n\n"
         f"Победители выбраны, уведомления отправлены."

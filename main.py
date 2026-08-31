@@ -282,7 +282,10 @@ async def read_consent(callback: CallbackQuery):
     if await is_admin(callback.from_user.id) or await is_excluded(callback.from_user.id):
         await callback.answer("Ваш аккаунт не участвует в розыгрыше", show_alert=True)
         return
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.answer(
         "📄 Условия конкурса, а также согласие на использование изображения "
         "и обработку персональных данных изложены в публичной оферте:\n\n"
@@ -341,7 +344,10 @@ async def handle_confirm_state(message: Message):
 
 @dp.callback_query(F.data == "confirm_no")
 async def confirm_no(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
     await callback.message.edit_reply_markup(reply_markup=None)
     await state.set_state(ReviewState.waiting_video)
     await callback.message.answer("Отправьте новый видеокружочек.")
@@ -421,12 +427,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok"}
 
 
-@app.get("/offer", response_class=HTMLResponse)
+@app.api_route("/offer", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def offer():
     text = CONSENT_TEXT_PART1 + "\n\n" + CONSENT_TEXT_PART2
     escaped = html_lib.escape(text)
@@ -445,3 +451,4 @@ async def offer():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
