@@ -420,7 +420,8 @@ async def lifespan(app: FastAPI):
         await ensure_super_admin()
     except Exception as e:
         logging.error(f"Error during startup: {e}")
-    asyncio.create_task(dp.start_polling(bot))
+    if os.getenv("POLL_ENABLED", "1") == "1":
+        asyncio.create_task(dp.start_polling(bot))
     yield
 
 
@@ -451,6 +452,7 @@ async def offer():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
 
 
 
