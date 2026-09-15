@@ -47,7 +47,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 dp.include_router(admin_router)
 
-OFFER_URL = "https://chat-bot-agent.onrender.com/offer"
+OFFER_URL = "http://79.132.138.95:8000/offer"
 CLIENTS_CHAT_URL = "https://t.me/+gIEAX5nwGH9mOGVi"
 
 WELCOME_TEXT = (
@@ -451,4 +451,5 @@ async def offer():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
 
